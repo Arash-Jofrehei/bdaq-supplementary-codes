@@ -1,5 +1,10 @@
 # Author: Arash Jofrehei - University of Zurich
-# Pixel-wise crosstalk scan to be used for BDAQ53
+# Last update: 29.06.2020
+# ------------------------------------------------------------
+# Copyright (c) All rights reserved
+# SiLab, Institute of Physics, University of Bonn
+# ------------------------------------------------------------
+#
 
 from tqdm import tqdm
 from bdaq53.scan_base import ScanBase
@@ -13,20 +18,23 @@ import tables as tb
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 
-# The parameters below will be written over the scan parameters and the chip parameters.
-
-masks = ['output_data/meta_tuning_HLL_irr_Bern_linear_372_thr1123_noise_occupancy_conservative.masks.h5','output_data/meta_tuning_HLL_irr_Bern_linear_380_thr1400_noise_occupancy_conservative.masks.h5']
-krumList = [20,24,28]
-vthList = [372,380]
-thrList = ['372_1123','380_1400']
-ROC = 'irr-HLL-Bern' # Arbitrary chip name. To be used in the name of the saved plots and numpy maps.
-thrFile = False
-#thrFile = 'output_data/long-threshold-scan_irr-HLL-Bern_VTH372_thr1123_HV300_krum20_interpreted.h5'
+#masks = ['output_data/meta_tuning_HLL_irr_Bern_linear_372_thr1123_noise_occupancy_conservative.masks.h5','output_data/meta_tuning_HLL_irr_Bern_linear_380_thr1400_noise_occupancy_conservative.masks.h5']
+#krumList = [20,24,28]
+#vthList = [372,380]
+#thrList = ['372_1123','380_1400']
+#ROC = 'irr-HLL-Bern'
+masks = ['output_data/meta_tuning_ROC12-14_linear_356_thr1030_noise_occupancy.masks.h5']
+krumList = [20]
+vthList = [365]
+thrList = ['365_1500']
+ROC = 'ROC6-12'
+thrFile = 'output_data/longThreshold_FBK_ROC6-12_VTH365_Thr_1500_interpreted.h5'
 stepVcal = 10
 nInjections = 100
 precisionPerTot = 5
-availableMap = True
-showPlots = False    # plots are saved anyways
+availableMap = False
+writeInverse = True
+showPlots = True    # plots are saved anyways
 
 
 scan_parameters = {
@@ -104,10 +112,16 @@ def getOcc(inputFile):
 
 def getTotMean(occ,nInjections):
     noiseORxtalkHITS = np.sum(occ) - nInjections
-    if (noiseORxtalkHITS > 20):
-        minTOT = np.min(occ[occ.astype(bool)])
-        noise_arg = np.where(occ==minTOT)[0][0]
-        occ[noise_arg] = max(0,occ[noise_arg]-noiseORxtalkHITS)
+    if (noiseORxtalkHITS > 0):
+        nextRemoval = noiseORxtalkHITS
+        while(nextRemoval > 0):
+            #minTOT = np.min(occ[occ.astype(bool)])
+            minTOT = occ[occ.astype(bool)][0]
+            noise_arg = np.where(occ==minTOT)[0][0]
+            removal = min(nextRemoval,occ[noise_arg])
+            occ[noise_arg] = occ[noise_arg]-removal
+            nextRemoval = nextRemoval-removal
+        
     meanTot = np.sum(np.multiply(np.arange(16),occ))*1.0/max(nInjections,np.sum(occ))
     return meanTot
 
@@ -140,6 +154,29 @@ def plotting(VCALs,meanTotMap,thr,krum,precisionPerTot):
     if showPlots:
         plt.show()
 
+def simpleInverse(vSteps,v2t,totCode):
+    vcals = []
+    for step in range(len(vSteps)-1):
+        if np.sign(totCode-0.1-v2t[step]) * np.sign(totCode-0.1-v2t[step+1]) != 1 or (totCode == 0 and (v2t[step] < 0.1 and v2t[step+1] > 0.1)):
+            vcals.append(0.5*(vSteps[step]+vSteps[step+1]))
+            break
+    if not vcals:
+        vcals.append(vSteps[-1])
+    return int(sum(vcals)/len(vcals))
+
+def writeInverseMatrix(inverseMatrixFile,vSteps, v2t_raw):
+    print('Calculating inverse matrix ...')
+    inverseMatrix = np.zeros((400,192,16))
+    for row in range(192):
+        for col in range(128,264):
+            for tot in range(16):
+                if v2t_raw[col,row,-1]:
+                    inverseMatrix[col,row,tot] = simpleInverse(vSteps,v2t_raw[col,row],tot)
+    np.save(inverseMatrixFile,inverseMatrix)
+    print('Inverse matrix is saved.')
+    return inverseMatrix
+
+        
 def v2tAnalysis(thrFile,stepVcal,nInjections):
     occMap = getOcc(thrFile)
     nSteps = occMap.shape[2]
@@ -158,8 +195,12 @@ if __name__ == '__main__':
     KRUM = str(krumList[0])
     VCALFile = 'VCALs_'+ROC+'_'+THR+'_'+KRUM+'.npy'
     totFile = 'mean_tot_'+ROC+'_'+THR+'_'+KRUM+'.npy'
+    takeThreshold = False
     if not thrFile:
         takeThreshold = True
+        print('Taking threshold scans.')
+    else:
+        print('Using already available threshold scans ...')
 
 
     if availableMap:
@@ -171,6 +212,9 @@ if __name__ == '__main__':
                 totFile = 'calibrationVCAL/mean_tot_'+ROC+'_'+THR+'_'+KRUM+'.npy'
                 VCALs,meanTotMap = getNpyFiles(VCALFile,totFile)
                 plotting(VCALs,meanTotMap,thrList[thr],str(krumList[krum]),precisionPerTot)
+                if writeInverse:
+                    inverseMatrixFile = 'calibrationVCAL/inversedVCAL_'+ROC+'_'+THR+'_'+KRUM+'.npy'
+                    writeInverseMatrix(inverseMatrixFile,VCALs, meanTotMap)
     else:
         for thr in range(len(vthList)):
             for krum in range(len(krumList)):
@@ -188,3 +232,8 @@ if __name__ == '__main__':
                 print('Calibration files for chip <<',ROC,'>> at Vthreshold_threshold',thrList[thr],'and krumenacher',krumList[krum],'are saved.')
                 print('                    ----    ----    ----    ----')
                 plotting(VCALs,meanTotMap,thrList[thr],str(krumList[krum]),precisionPerTot)
+                if writeInverse:
+                    inverseMatrixFile = 'calibrationVCAL/inversedVCAL_'+ROC+'_'+THR+'_'+KRUM+'.npy'
+                    writeInverseMatrix(inverseMatrixFile,VCALs, meanTotMap)
+    
+    
